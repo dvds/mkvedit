@@ -9,6 +9,14 @@ def remove_dateutc(input_filename, output_filename):
     pass
 
 
+def change_muxingapp(input_filename, output_filename, new_muxingapp):
+    pass
+
+
+def change_writingapp(input_filename, output_filename, new_writingapp):
+    pass
+
+
 if __name__ == "__main__":
 
     if len(argv) < 2:
