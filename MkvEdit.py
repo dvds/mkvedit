@@ -21,6 +21,10 @@ def change_trackuid(input_filename, output_filename, track_number, new_trackuid)
     pass
 
 
+def change_attachment_fileuid(input_filename, output_filename, attachment_filename, new_fileuid):
+    pass
+
+
 if __name__ == "__main__":
 
     if len(argv) < 2:
