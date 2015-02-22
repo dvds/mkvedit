@@ -17,6 +17,10 @@ def change_writingapp(input_filename, output_filename, new_writingapp):
     pass
 
 
+def change_trackuid(input_filename, output_filename, track_number, new_trackuid):
+    pass
+
+
 if __name__ == "__main__":
 
     if len(argv) < 2:
