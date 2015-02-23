@@ -7,7 +7,7 @@ from sys import argv, modules
 
 
 from ebml.core import encode_element_id, encode_element_size, encode_unicode_string, encode_unsigned_integer, read_element_id, read_element_size
-from ebml.schema.matroska import DateUTCElement, InfoElement, MatroskaDocument, MuxingAppElement, SegmentElement, TracksElement, TrackEntryElement, TrackNumberElement, TrackUIDElement, WritingAppElement
+from ebml.schema.matroska import AttachmentsElement, AttachedFileElement, DateUTCElement, FileNameElement, FileUIDElement, InfoElement, MatroskaDocument, MuxingAppElement, SegmentElement, TracksElement, TrackEntryElement, TrackNumberElement, TrackUIDElement, WritingAppElement
 
 
 def remove_dateutc(input_filename, output_filename):
@@ -210,7 +210,59 @@ def change_trackuid(input_filename, output_filename, track_number, new_trackuid)
 
 
 def change_attachment_fileuid(input_filename, output_filename, attachment_filename, new_fileuid):
-    pass
+
+    with open(input_filename, "rb") as input_file:
+
+        with open(output_filename, "wb") as output_file:
+
+            input_matroska_document = MatroskaDocument(input_file)
+
+            offset = 0
+
+            for root_element in input_matroska_document.roots:
+                if root_element.id != SegmentElement.id:
+                    offset += __write_element(output_file, root_element)
+
+                else:
+                    segment_element = root_element
+
+                    offset += __write_element_header(input_file, offset, output_file, segment_element.body_size)
+
+                    for segment_child_element in segment_element.value:
+                        if segment_child_element.id != AttachmentsElement.id:
+                            offset += __write_element(output_file, segment_child_element)
+
+                        else:
+                            attachments_element = segment_child_element
+
+                            offset += __write_element_header(input_file, offset, output_file, attachments_element.body_size)
+
+                            for attachments_child_element in attachments_element.value:
+                                if attachments_child_element.id != AttachedFileElement.id:
+                                    offset += __write_element(output_file, attachments_child_element)
+
+                                else:
+                                    attachedfile_element = attachments_child_element
+
+                                    for attachedfile_child_element in attachedfile_element.value:
+                                        if attachedfile_child_element.id == FileNameElement.id:
+                                            filename_element = attachedfile_child_element
+
+                                            if filename_element.value != attachment_filename:
+                                                offset += __write_element(output_file, attachedfile_element)
+
+                                            else:
+                                                offset += __write_element_header(input_file, offset, output_file, attachedfile_element.body_size)
+
+                                                for target_attachedfile_child_element in attachedfile_element.value:
+                                                    if target_attachedfile_child_element.id != FileUIDElement.id:
+                                                        offset += __write_element(output_file, target_attachedfile_child_element)
+
+                                                    else:
+                                                        fileuid_element = target_attachedfile_child_element
+
+                                                        offset += __write_element_header(input_file, offset, output_file, fileuid_element.body_size)
+                                                        offset += __write_element_uint(output_file, int(new_fileuid), fileuid_element.body_size)
 
 
 def __write_element(file, element):
