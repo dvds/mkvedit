@@ -6,8 +6,8 @@ from os import SEEK_SET
 from sys import argv, modules
 
 
-from ebml.core import encode_element_id, encode_element_size, encode_unicode_string, read_element_id, read_element_size
-from ebml.schema.matroska import DateUTCElement, InfoElement, MatroskaDocument, MuxingAppElement, SegmentElement, WritingAppElement
+from ebml.core import encode_element_id, encode_element_size, encode_unicode_string, encode_unsigned_integer, read_element_id, read_element_size
+from ebml.schema.matroska import DateUTCElement, InfoElement, MatroskaDocument, MuxingAppElement, SegmentElement, TracksElement, TrackEntryElement, TrackNumberElement, TrackUIDElement, WritingAppElement
 
 
 def remove_dateutc(input_filename, output_filename):
@@ -154,7 +154,59 @@ def change_writingapp(input_filename, output_filename, new_writingapp):
 
 
 def change_trackuid(input_filename, output_filename, track_number, new_trackuid):
-    pass
+
+    with open(input_filename, "rb") as input_file:
+
+        with open(output_filename, "wb") as output_file:
+
+            input_matroska_document = MatroskaDocument(input_file)
+
+            offset = 0
+
+            for root_element in input_matroska_document.roots:
+                if root_element.id != SegmentElement.id:
+                    offset += __write_element(output_file, root_element)
+
+                else:
+                    segment_element = root_element
+
+                    offset += __write_element_header(input_file, offset, output_file, segment_element.body_size)
+
+                    for segment_child_element in segment_element.value:
+                        if segment_child_element.id != TracksElement.id:
+                            offset += __write_element(output_file, segment_child_element)
+
+                        else:
+                            tracks_element = segment_child_element
+
+                            offset += __write_element_header(input_file, offset, output_file, tracks_element.body_size)
+
+                            for tracks_child_element in tracks_element.value:
+                                if tracks_child_element.id != TrackEntryElement.id:
+                                    offset += __write_element(output_file, tracks_child_element)
+
+                                else:
+                                    trackentry_element = tracks_child_element
+
+                                    for trackentry_child_element in trackentry_element.value:
+                                        if trackentry_child_element.id == TrackNumberElement.id:
+                                            tracknumber_element = trackentry_child_element
+
+                                            if tracknumber_element.value != int(track_number):
+                                                offset += __write_element(output_file, trackentry_element)
+
+                                            else:
+                                                offset += __write_element_header(input_file, offset, output_file, trackentry_element.body_size)
+
+                                                for target_trackentry_child_element in trackentry_element.value:
+                                                    if target_trackentry_child_element.id != TrackUIDElement.id:
+                                                        offset += __write_element(output_file, target_trackentry_child_element)
+
+                                                    else:
+                                                        trackuid_element = target_trackentry_child_element
+
+                                                        offset += __write_element_header(input_file, offset, output_file, trackuid_element.body_size)
+                                                        offset += __write_element_uint(output_file, int(new_trackuid), trackuid_element.body_size)
 
 
 def change_attachment_fileuid(input_filename, output_filename, attachment_filename, new_fileuid):
@@ -189,6 +241,15 @@ def __write_element_utf8string(output_file, value):
 
     output_offset = output_file.tell()
     output_file.write(encode_unicode_string(value))
+    new_output_offset = output_file.tell()
+
+    return new_output_offset - output_offset
+
+
+def __write_element_uint(output_file, value, size):
+
+    output_offset = output_file.tell()
+    output_file.write(encode_unsigned_integer(value, size))
     new_output_offset = output_file.tell()
 
     return new_output_offset - output_offset
