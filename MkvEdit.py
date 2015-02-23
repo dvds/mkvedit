@@ -6,8 +6,8 @@ from os import SEEK_SET
 from sys import argv, modules
 
 
-from ebml.core import encode_element_id, encode_element_size, read_element_id, read_element_size
-from ebml.schema.matroska import DateUTCElement, InfoElement, MatroskaDocument, SegmentElement
+from ebml.core import encode_element_id, encode_element_size, encode_unicode_string, read_element_id, read_element_size
+from ebml.schema.matroska import DateUTCElement, InfoElement, MatroskaDocument, MuxingAppElement, SegmentElement
 
 
 def remove_dateutc(input_filename, output_filename):
@@ -25,9 +25,9 @@ def remove_dateutc(input_filename, output_filename):
                     offset += __write_element(output_file, root_element)
 
                 else:
-                    dateutc_element_size = 0
-
                     segment_element = root_element
+
+                    dateutc_element_size = 0
 
                     for segment_child_element in segment_element.value:
                         if segment_child_element.id == InfoElement.id:
@@ -56,7 +56,52 @@ def remove_dateutc(input_filename, output_filename):
 
 
 def change_muxingapp(input_filename, output_filename, new_muxingapp):
-    pass
+
+    with open(input_filename, "rb") as input_file:
+
+        with open(output_filename, "wb") as output_file:
+
+            input_matroska_document = MatroskaDocument(input_file)
+
+            offset = 0
+
+            for root_element in input_matroska_document.roots:
+                if root_element.id != SegmentElement.id:
+                    offset += __write_element(output_file, root_element)
+
+                else:
+                    segment_element = root_element
+
+                    muxingapp_element_body_size = 0
+
+                    for segment_child_element in segment_element.value:
+                        if segment_child_element.id == InfoElement.id:
+                            info_element = segment_child_element
+
+                            for info_child_element in info_element.value:
+                                if info_child_element.id == MuxingAppElement.id:
+                                    muxingapp_element = info_child_element
+
+                                    muxingapp_element_body_size = muxingapp_element.body_size
+
+                    offset += __write_element_header(input_file, offset, output_file, segment_element.body_size - (muxingapp_element_body_size - len(new_muxingapp)))
+
+                    for segment_child_element in segment_element.value:
+                        if segment_child_element.id != InfoElement.id:
+                            offset += __write_element(output_file, segment_child_element)
+
+                        else:
+                            info_element = segment_child_element
+
+                            offset += __write_element_header(input_file, offset, output_file, info_element.body_size - (muxingapp_element_body_size - len(new_muxingapp)))
+
+                            for info_child_element in info_element.value:
+                                if info_child_element.id != MuxingAppElement.id:
+                                    offset += __write_element(output_file, info_child_element)
+
+                                else:
+                                    offset += __write_element_header(input_file, offset, output_file, len(new_muxingapp))
+                                    offset += __write_element_utf8string(output_file, new_muxingapp)
 
 
 def change_writingapp(input_filename, output_filename, new_writingapp):
@@ -90,6 +135,15 @@ def __write_element_header(input_file, input_offset, output_file, element_body_s
     output_offset = output_file.tell()
     output_file.write(encode_element_id(element_id))
     output_file.write(encode_element_size(element_body_size, element_size_size))
+    new_output_offset = output_file.tell()
+
+    return new_output_offset - output_offset
+
+
+def __write_element_utf8string(output_file, value):
+
+    output_offset = output_file.tell()
+    output_file.write(encode_unicode_string(value))
     new_output_offset = output_file.tell()
 
     return new_output_offset - output_offset
