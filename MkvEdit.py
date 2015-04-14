@@ -1,12 +1,13 @@
 """Contains functions to edit a matroska file."""
 
 
-from inspect import getmembers, isclass, isfunction
-from os import SEEK_SET
+from collections import namedtuple
+from inspect import getmembers, isfunction
+from os import SEEK_CUR
 from sys import argv, modules
 
 
-from ebml.core import encode_element_id, encode_element_size, encode_unicode_string, encode_unsigned_integer, read_element_id, read_element_size
+from ebml.core import encode_element_id, encode_element_size, encode_unicode_string, encode_unsigned_integer, MAXIMUM_ELEMENT_SIZE_LENGTH
 from ebml.schema.matroska import AttachmentsElement, AttachedFileElement, DateUTCElement, FileNameElement, FileUIDElement, InfoElement, MatroskaDocument, MuxingAppElement, SegmentElement, TracksElement, TrackEntryElement, TrackNumberElement, TrackUIDElement, WritingAppElement
 
 
@@ -14,297 +15,374 @@ def remove_dateutc(input_filename, output_filename):
 
     with open(input_filename, "rb") as input_file:
 
+        input_matroska_document = MatroskaDocument(input_file)
+
+        # retrieve element metadata
+        segment_element_metadata = __find_element_metadata(input_matroska_document.roots, SegmentElement, 0)
+
+        info_element_metadata = __find_element_metadata(segment_element_metadata.element.value, InfoElement, segment_element_metadata.offset + segment_element_metadata.element.head_size)
+
+        dateutc_element_metadata = __find_element_metadata(info_element_metadata.element.value, DateUTCElement, info_element_metadata.offset + info_element_metadata.element.head_size)
+
+        # calculate edited element sizes
+        new_info_element_body_size = info_element_metadata.element.body_size - dateutc_element_metadata.element.stream.size
+        new_info_element_head_size = len(encode_element_size(new_info_element_body_size)) + 4	# 4 byte element id (0x1549A966)
+
+        new_segment_element_body_size = segment_element_metadata.element.body_size + new_info_element_head_size + new_info_element_body_size - info_element_metadata.element.stream.size
+        new_segment_element_head_size = len(encode_element_size(new_segment_element_body_size)) + 4	# 4 byte element id (0x18538067)
+
+        # write out the new file
         with open(output_filename, "wb") as output_file:
 
-            input_matroska_document = MatroskaDocument(input_file)
+            # write the pre-segment header block
+            input_file.seek(0)
+            __buffered_file_copy(input_file, output_file, segment_element_metadata.offset)
 
-            offset = 0
+            # write the segment header
+            output_file.write(encode_element_id(SegmentElement.id))
+            output_file.write(encode_element_size(new_segment_element_body_size, MAXIMUM_ELEMENT_SIZE_LENGTH))
 
-            for root_element in input_matroska_document.roots:
-                if root_element.id != SegmentElement.id:
-                    offset += __write_element(output_file, root_element)
+            # write the post-segment header block / pre-info header block
+            input_file.seek(segment_element_metadata.element.head_size, SEEK_CUR)
+            __buffered_file_copy(input_file, output_file, info_element_metadata.offset - (segment_element_metadata.offset + segment_element_metadata.element.head_size))
 
-                else:
-                    segment_element = root_element
+            # write the info header
+            output_file.write(encode_element_id(InfoElement.id))
+            output_file.write(encode_element_size(new_info_element_body_size))
 
-                    dateutc_element_size = 0
+            # write the post-info header block / pre-dateutc header block
+            input_file.seek(info_element_metadata.element.head_size, SEEK_CUR)
+            __buffered_file_copy(input_file, output_file, dateutc_element_metadata.offset - (info_element_metadata.offset + info_element_metadata.element.head_size))
 
-                    for segment_child_element in segment_element.value:
-                        if segment_child_element.id == InfoElement.id:
-                            info_element = segment_child_element
+            # write the post-dateutc block
+            input_file.seek(dateutc_element_metadata.element.stream.size, SEEK_CUR)
+            __buffered_file_copy(input_file, output_file)
 
-                            for info_child_element in info_element.value:
-                                if info_child_element.id == DateUTCElement.id:
-                                    dateutc_element = info_child_element
-
-                                    dateutc_element_size = dateutc_element.size
-
-                    offset += __write_element_header(input_file, offset, output_file, segment_element.body_size - dateutc_element_size)
-
-                    for segment_child_element in segment_element.value:
-                        if segment_child_element.id != InfoElement.id:
-                            offset += __write_element(output_file, segment_child_element)
-
-                        else:
-                            info_element = segment_child_element
-
-                            offset += __write_element_header(input_file, offset, output_file, info_element.body_size - dateutc_element_size)
-
-                            for info_child_element in info_element.value:
-                                if info_child_element.id != DateUTCElement.id:
-                                    offset += __write_element(output_file, info_child_element)
+            return       
 
 
 def change_muxingapp(input_filename, output_filename, new_muxingapp):
 
     with open(input_filename, "rb") as input_file:
 
+        input_matroska_document = MatroskaDocument(input_file)
+
+        # retrieve element metadata
+        segment_element_metadata = __find_element_metadata(input_matroska_document.roots, SegmentElement, 0)
+
+        info_element_metadata = __find_element_metadata(segment_element_metadata.element.value, InfoElement, segment_element_metadata.offset + segment_element_metadata.element.head_size)
+
+        muxingapp_element_metadata = __find_element_metadata(info_element_metadata.element.value, MuxingAppElement, info_element_metadata.offset + info_element_metadata.element.head_size)
+
+        # calculate edited element sizes
+        new_muxingapp_element_body_size = len(encode_unicode_string(new_muxingapp))
+        new_muxingapp_element_head_size = len(encode_element_size(new_muxingapp_element_body_size)) + 2	# 2 byte element id (0x4D80)
+
+        new_info_element_body_size = info_element_metadata.element.body_size + new_muxingapp_element_head_size + new_muxingapp_element_body_size - muxingapp_element_metadata.element.stream.size
+        new_info_element_head_size = len(encode_element_size(new_info_element_body_size)) + 4	# 4 byte element id (0x1549A966)
+
+        new_segment_element_body_size = segment_element_metadata.element.body_size + new_info_element_head_size + new_info_element_body_size - info_element_metadata.element.stream.size
+        new_segment_element_head_size = len(encode_element_size(new_segment_element_body_size)) + 4	# 4 byte element id (0x18538067)
+
+        # write out the new file
         with open(output_filename, "wb") as output_file:
 
-            input_matroska_document = MatroskaDocument(input_file)
+            # write the pre-segment header block
+            input_file.seek(0)
+            __buffered_file_copy(input_file, output_file, segment_element_metadata.offset)
 
-            offset = 0
+            # write the segment header
+            output_file.write(encode_element_id(SegmentElement.id))
+            output_file.write(encode_element_size(new_segment_element_body_size, MAXIMUM_ELEMENT_SIZE_LENGTH))
 
-            for root_element in input_matroska_document.roots:
-                if root_element.id != SegmentElement.id:
-                    offset += __write_element(output_file, root_element)
+            # write the post-segment header block / pre-info header block
+            input_file.seek(segment_element_metadata.element.head_size, SEEK_CUR)
+            __buffered_file_copy(input_file, output_file, info_element_metadata.offset - (segment_element_metadata.offset + segment_element_metadata.element.head_size))
 
-                else:
-                    segment_element = root_element
+            # write the info header
+            output_file.write(encode_element_id(InfoElement.id))
+            output_file.write(encode_element_size(new_info_element_body_size))
 
-                    muxingapp_element_body_size = 0
+            # write the post-info header block / pre-muxingapp header block
+            input_file.seek(info_element_metadata.element.head_size, SEEK_CUR)
+            __buffered_file_copy(input_file, output_file, muxingapp_element_metadata.offset - (info_element_metadata.offset + info_element_metadata.element.head_size))
 
-                    for segment_child_element in segment_element.value:
-                        if segment_child_element.id == InfoElement.id:
-                            info_element = segment_child_element
+            # write the muxingapp header
+            output_file.write(encode_element_id(MuxingAppElement.id))
+            output_file.write(encode_element_size(new_muxingapp_element_body_size))
 
-                            for info_child_element in info_element.value:
-                                if info_child_element.id == MuxingAppElement.id:
-                                    muxingapp_element = info_child_element
+            # write the muxingapp
+            output_file.write(encode_unicode_string(new_muxingapp))
 
-                                    muxingapp_element_body_size = muxingapp_element.body_size
+            # write the post-muxingapp block
+            input_file.seek(muxingapp_element_metadata.element.stream.size, SEEK_CUR)
+            __buffered_file_copy(input_file, output_file)
 
-                    offset += __write_element_header(input_file, offset, output_file, segment_element.body_size - (muxingapp_element_body_size - len(new_muxingapp)))
-
-                    for segment_child_element in segment_element.value:
-                        if segment_child_element.id != InfoElement.id:
-                            offset += __write_element(output_file, segment_child_element)
-
-                        else:
-                            info_element = segment_child_element
-
-                            offset += __write_element_header(input_file, offset, output_file, info_element.body_size - (muxingapp_element_body_size - len(new_muxingapp)))
-
-                            for info_child_element in info_element.value:
-                                if info_child_element.id != MuxingAppElement.id:
-                                    offset += __write_element(output_file, info_child_element)
-
-                                else:
-                                    offset += __write_element_header(input_file, offset, output_file, len(new_muxingapp))
-                                    offset += __write_element_utf8string(output_file, new_muxingapp)
+            return       
 
 
 def change_writingapp(input_filename, output_filename, new_writingapp):
 
     with open(input_filename, "rb") as input_file:
 
+        input_matroska_document = MatroskaDocument(input_file)
+
+        # retrieve element metadata
+        segment_element_metadata = __find_element_metadata(input_matroska_document.roots, SegmentElement, 0)
+
+        info_element_metadata = __find_element_metadata(segment_element_metadata.element.value, InfoElement, segment_element_metadata.offset + segment_element_metadata.element.head_size)
+
+        writingapp_element_metadata = __find_element_metadata(info_element_metadata.element.value, WritingAppElement, info_element_metadata.offset + info_element_metadata.element.head_size)
+
+        # calculate edited element sizes
+        new_writingapp_element_body_size = len(encode_unicode_string(new_writingapp))
+        new_writingapp_element_head_size = len(encode_element_size(new_writingapp_element_body_size)) + 2	# 2 byte element id (0x5741)
+
+        new_info_element_body_size = info_element_metadata.element.body_size + new_writingapp_element_head_size + new_writingapp_element_body_size - writingapp_element_metadata.element.stream.size
+        new_info_element_head_size = len(encode_element_size(new_info_element_body_size)) + 4	# 4 byte element id (0x1549A966)
+
+        new_segment_element_body_size = segment_element_metadata.element.body_size + new_info_element_head_size + new_info_element_body_size - info_element_metadata.element.stream.size
+        new_segment_element_head_size = len(encode_element_size(new_segment_element_body_size)) + 4	# 4 byte element id (0x18538067)
+
+        # write out the new file
         with open(output_filename, "wb") as output_file:
 
-            input_matroska_document = MatroskaDocument(input_file)
+            # write the pre-segment header block
+            input_file.seek(0)
+            __buffered_file_copy(input_file, output_file, segment_element_metadata.offset)
 
-            offset = 0
+            # write the segment header
+            output_file.write(encode_element_id(SegmentElement.id))
+            output_file.write(encode_element_size(new_segment_element_body_size, MAXIMUM_ELEMENT_SIZE_LENGTH))
 
-            for root_element in input_matroska_document.roots:
-                if root_element.id != SegmentElement.id:
-                    offset += __write_element(output_file, root_element)
+            # write the post-segment header block / pre-info header block
+            input_file.seek(segment_element_metadata.element.head_size, SEEK_CUR)
+            __buffered_file_copy(input_file, output_file, info_element_metadata.offset - (segment_element_metadata.offset + segment_element_metadata.element.head_size))
 
-                else:
-                    segment_element = root_element
+            # write the info header
+            output_file.write(encode_element_id(InfoElement.id))
+            output_file.write(encode_element_size(new_info_element_body_size))
 
-                    writingapp_element_body_size = 0
+            # write the post-info header block / pre-writingapp header block
+            input_file.seek(info_element_metadata.element.head_size, SEEK_CUR)
+            __buffered_file_copy(input_file, output_file, writingapp_element_metadata.offset - (info_element_metadata.offset + info_element_metadata.element.head_size))
 
-                    for segment_child_element in segment_element.value:
-                        if segment_child_element.id == InfoElement.id:
-                            info_element = segment_child_element
+            # write the writingapp header
+            output_file.write(encode_element_id(WritingAppElement.id))
+            output_file.write(encode_element_size(new_writingapp_element_body_size))
 
-                            for info_child_element in info_element.value:
-                                if info_child_element.id == WritingAppElement.id:
-                                    writingapp_element = info_child_element
+            # write the writingapp
+            output_file.write(encode_unicode_string(new_writingapp))
 
-                                    writingapp_element_body_size = writingapp_element.body_size
+            # write the post writingapp block
+            input_file.seek(writingapp_element_metadata.element.stream.size, SEEK_CUR)
+            __buffered_file_copy(input_file, output_file)
 
-                    offset += __write_element_header(input_file, offset, output_file, segment_element.body_size - (writingapp_element_body_size - len(new_writingapp)))
-
-                    for segment_child_element in segment_element.value:
-                        if segment_child_element.id != InfoElement.id:
-                            offset += __write_element(output_file, segment_child_element)
-
-                        else:
-                            info_element = segment_child_element
-
-                            offset += __write_element_header(input_file, offset, output_file, info_element.body_size - (writingapp_element_body_size - len(new_writingapp)))
-
-                            for info_child_element in info_element.value:
-                                if info_child_element.id != WritingAppElement.id:
-                                    offset += __write_element(output_file, info_child_element)
-
-                                else:
-                                    offset += __write_element_header(input_file, offset, output_file, len(new_writingapp))
-                                    offset += __write_element_utf8string(output_file, new_writingapp)
+            return       
 
 
 def change_trackuid(input_filename, output_filename, track_number, new_trackuid):
 
     with open(input_filename, "rb") as input_file:
 
+        input_matroska_document = MatroskaDocument(input_file)
+
+        # retrieve element metadata
+        segment_element_metadata = __find_element_metadata(input_matroska_document.roots, SegmentElement, 0)
+
+        tracks_element_metadata = __find_element_metadata(segment_element_metadata.element.value, TracksElement, segment_element_metadata.offset + segment_element_metadata.element.head_size)
+
+        trackentry_element_metadata = __find_element_metadata(tracks_element_metadata.element.value, TrackEntryElement, tracks_element_metadata.offset + tracks_element_metadata.element.head_size, lambda e: e.id == TrackNumberElement.id and e.value == long(track_number))
+
+        trackuid_element_metadata = __find_element_metadata(trackentry_element_metadata.element.value, TrackUIDElement, trackentry_element_metadata.offset + trackentry_element_metadata.element.head_size)
+
+        # calculate edited element sizes
+        new_trackuid_element_body_size = len(encode_unsigned_integer(long(new_trackuid)))
+        new_trackuid_element_head_size = len(encode_element_size(new_trackuid_element_body_size)) + 2	# 2 byte element id (0x73C5)
+
+        new_trackentry_element_body_size = trackentry_element_metadata.element.body_size + new_trackuid_element_head_size + new_trackuid_element_body_size - trackuid_element_metadata.element.stream.size
+        new_trackentry_element_head_size = len(encode_element_size(new_trackentry_element_body_size)) + 1	# 1 byte element id (0xAE)
+
+        new_tracks_element_body_size = tracks_element_metadata.element.body_size + new_trackentry_element_head_size + new_trackentry_element_body_size - trackentry_element_metadata.element.stream.size
+        new_tracks_element_head_size = len(encode_element_size(new_tracks_element_body_size)) + 4	# 4 byte element id (0x1654AE6B)
+
+        new_segment_element_body_size = segment_element_metadata.element.body_size + new_tracks_element_head_size + new_tracks_element_body_size - tracks_element_metadata.element.stream.size
+        new_segment_element_head_size = len(encode_element_size(new_segment_element_body_size)) + 4	# 4 byte element id (0x18538067)
+
+        # write out the new file
         with open(output_filename, "wb") as output_file:
 
-            input_matroska_document = MatroskaDocument(input_file)
+            # write the pre-segment header block
+            input_file.seek(0)
+            __buffered_file_copy(input_file, output_file, segment_element_metadata.offset)
 
-            offset = 0
+            # write the segment header
+            output_file.write(encode_element_id(SegmentElement.id))
+            output_file.write(encode_element_size(new_segment_element_body_size, MAXIMUM_ELEMENT_SIZE_LENGTH))
 
-            for root_element in input_matroska_document.roots:
-                if root_element.id != SegmentElement.id:
-                    offset += __write_element(output_file, root_element)
+            # write the post-segment header block / pre-tracks header block
+            input_file.seek(segment_element_metadata.element.head_size, SEEK_CUR)
+            __buffered_file_copy(input_file, output_file, tracks_element_metadata.offset - (segment_element_metadata.offset + segment_element_metadata.element.head_size))
 
-                else:
-                    segment_element = root_element
+            # write the tracks header
+            output_file.write(encode_element_id(TracksElement.id))
+            output_file.write(encode_element_size(new_tracks_element_body_size))
 
-                    offset += __write_element_header(input_file, offset, output_file, segment_element.body_size)
+            # write the post-tracks header block / pre-trackentry header block
+            input_file.seek(tracks_element_metadata.element.head_size, SEEK_CUR)
+            __buffered_file_copy(input_file, output_file, trackentry_element_metadata.offset - (tracks_element_metadata.offset + tracks_element_metadata.element.head_size))
 
-                    for segment_child_element in segment_element.value:
-                        if segment_child_element.id != TracksElement.id:
-                            offset += __write_element(output_file, segment_child_element)
+            # write the trackentry header
+            output_file.write(encode_element_id(TrackEntryElement.id))
+            output_file.write(encode_element_size(new_trackentry_element_body_size))
 
-                        else:
-                            tracks_element = segment_child_element
+            # write the post-trackentry header block / pre-trackuid header block
+            input_file.seek(trackentry_element_metadata.element.head_size, SEEK_CUR)
+            __buffered_file_copy(input_file, output_file, trackuid_element_metadata.offset - (trackentry_element_metadata.offset + trackentry_element_metadata.element.head_size))
 
-                            offset += __write_element_header(input_file, offset, output_file, tracks_element.body_size)
+            # write the trackuid header
+            output_file.write(encode_element_id(TrackUIDElement.id))
+            output_file.write(encode_element_size(new_trackuid_element_body_size))
 
-                            for tracks_child_element in tracks_element.value:
-                                if tracks_child_element.id != TrackEntryElement.id:
-                                    offset += __write_element(output_file, tracks_child_element)
+            # write the trackuid
+            output_file.write(encode_unsigned_integer(long(new_trackuid)))
 
-                                else:
-                                    trackentry_element = tracks_child_element
+            # write the post trackuid block
+            input_file.seek(trackuid_element_metadata.element.stream.size, SEEK_CUR)
+            __buffered_file_copy(input_file, output_file)
 
-                                    for trackentry_child_element in trackentry_element.value:
-                                        if trackentry_child_element.id == TrackNumberElement.id:
-                                            tracknumber_element = trackentry_child_element
-
-                                            if tracknumber_element.value != int(track_number):
-                                                offset += __write_element(output_file, trackentry_element)
-
-                                            else:
-                                                offset += __write_element_header(input_file, offset, output_file, trackentry_element.body_size)
-
-                                                for target_trackentry_child_element in trackentry_element.value:
-                                                    if target_trackentry_child_element.id != TrackUIDElement.id:
-                                                        offset += __write_element(output_file, target_trackentry_child_element)
-
-                                                    else:
-                                                        trackuid_element = target_trackentry_child_element
-
-                                                        offset += __write_element_header(input_file, offset, output_file, trackuid_element.body_size)
-                                                        offset += __write_element_uint(output_file, int(new_trackuid), trackuid_element.body_size)
+            return       
 
 
 def change_attachment_fileuid(input_filename, output_filename, attachment_filename, new_fileuid):
 
     with open(input_filename, "rb") as input_file:
 
+        input_matroska_document = MatroskaDocument(input_file)
+
+        # retrieve element metadata
+        segment_element_metadata = __find_element_metadata(input_matroska_document.roots, SegmentElement, 0)
+
+        attachments_element_metadata = __find_element_metadata(segment_element_metadata.element.value, AttachmentsElement, segment_element_metadata.offset + segment_element_metadata.element.head_size)
+
+        attachedfile_element_metadata = __find_element_metadata(attachments_element_metadata.element.value, AttachedFileElement, attachments_element_metadata.offset + attachments_element_metadata.element.head_size, lambda e: e.id == FileNameElement.id and e.value == attachment_filename)
+
+        fileuid_element_metadata = __find_element_metadata(attachedfile_element_metadata.element.value, FileUIDElement, attachedfile_element_metadata.offset + attachedfile_element_metadata.element.head_size)
+
+        # calculate edited element sizes
+        new_fileuid_element_body_size = len(encode_unsigned_integer(long(new_fileuid)))
+        new_fileuid_element_head_size = len(encode_element_size(new_fileuid_element_body_size)) + 2	# 2 byte element id (0x46AE)
+
+        new_attachedfile_element_body_size = attachedfile_element_metadata.element.body_size + new_fileuid_element_head_size + new_fileuid_element_body_size - fileuid_element_metadata.element.stream.size
+        new_attachedfile_element_head_size = len(encode_element_size(new_attachedfile_element_body_size)) + 2	# 2 byte element id (0x61A7)
+
+        new_attachments_element_body_size = attachments_element_metadata.element.body_size + new_attachedfile_element_head_size + new_attachedfile_element_body_size - attachedfile_element_metadata.element.stream.size
+        new_attachments_element_head_size = len(encode_element_size(new_attachments_element_body_size)) + 4	# 4 byte element id (0x1941A469)
+
+        new_segment_element_body_size = segment_element_metadata.element.body_size + new_attachments_element_head_size + new_attachments_element_body_size - attachments_element_metadata.element.stream.size
+        new_segment_element_head_size = len(encode_element_size(new_segment_element_body_size)) + 4	# 4 byte element id (0x18538067)
+
+        # write out the new file
         with open(output_filename, "wb") as output_file:
 
-            input_matroska_document = MatroskaDocument(input_file)
+            # write the pre-segment header block
+            input_file.seek(0)
+            __buffered_file_copy(input_file, output_file, segment_element_metadata.offset)
 
-            offset = 0
+            # write the segment header
+            output_file.write(encode_element_id(SegmentElement.id))
+            output_file.write(encode_element_size(new_segment_element_body_size, MAXIMUM_ELEMENT_SIZE_LENGTH))
 
-            for root_element in input_matroska_document.roots:
-                if root_element.id != SegmentElement.id:
-                    offset += __write_element(output_file, root_element)
+            # write the post-segment header block / pre-attachments header block
+            input_file.seek(segment_element_metadata.element.head_size, SEEK_CUR)
+            __buffered_file_copy(input_file, output_file, attachments_element_metadata.offset - (segment_element_metadata.offset + segment_element_metadata.element.head_size))
 
-                else:
-                    segment_element = root_element
+            # write the attachments header
+            output_file.write(encode_element_id(AttachmentsElement.id))
+            output_file.write(encode_element_size(new_attachments_element_body_size))
 
-                    offset += __write_element_header(input_file, offset, output_file, segment_element.body_size)
+            # write the post-attachments header block / pre-attachedfile header block
+            input_file.seek(attachments_element_metadata.element.head_size, SEEK_CUR)
+            __buffered_file_copy(input_file, output_file, attachedfile_element_metadata.offset - (attachments_element_metadata.offset + attachments_element_metadata.element.head_size))
 
-                    for segment_child_element in segment_element.value:
-                        if segment_child_element.id != AttachmentsElement.id:
-                            offset += __write_element(output_file, segment_child_element)
+            # write the attachedfile header
+            output_file.write(encode_element_id(AttachedFileElement.id))
+            output_file.write(encode_element_size(new_attachedfile_element_body_size))
 
-                        else:
-                            attachments_element = segment_child_element
+            # write the post-attachedfile header block / pre-fileuid header block
+            input_file.seek(attachedfile_element_metadata.element.head_size, SEEK_CUR)
+            __buffered_file_copy(input_file, output_file, fileuid_element_metadata.offset - (attachedfile_element_metadata.offset + attachedfile_element_metadata.element.head_size))
 
-                            offset += __write_element_header(input_file, offset, output_file, attachments_element.body_size)
+            # write the fileuid header
+            output_file.write(encode_element_id(FileUIDElement.id))
+            output_file.write(encode_element_size(new_fileuid_element_body_size))
 
-                            for attachments_child_element in attachments_element.value:
-                                if attachments_child_element.id != AttachedFileElement.id:
-                                    offset += __write_element(output_file, attachments_child_element)
+            # write the fileuid
+            output_file.write(encode_unsigned_integer(long(new_fileuid)))
 
-                                else:
-                                    attachedfile_element = attachments_child_element
+            # write the post fileuid block
+            input_file.seek(fileuid_element_metadata.element.stream.size, SEEK_CUR)
+            __buffered_file_copy(input_file, output_file)
 
-                                    for attachedfile_child_element in attachedfile_element.value:
-                                        if attachedfile_child_element.id == FileNameElement.id:
-                                            filename_element = attachedfile_child_element
-
-                                            if filename_element.value != attachment_filename:
-                                                offset += __write_element(output_file, attachedfile_element)
-
-                                            else:
-                                                offset += __write_element_header(input_file, offset, output_file, attachedfile_element.body_size)
-
-                                                for target_attachedfile_child_element in attachedfile_element.value:
-                                                    if target_attachedfile_child_element.id != FileUIDElement.id:
-                                                        offset += __write_element(output_file, target_attachedfile_child_element)
-
-                                                    else:
-                                                        fileuid_element = target_attachedfile_child_element
-
-                                                        offset += __write_element_header(input_file, offset, output_file, fileuid_element.body_size)
-                                                        offset += __write_element_uint(output_file, int(new_fileuid), fileuid_element.body_size)
+            return       
 
 
-def __write_element(file, element):
+def __find_element_metadata(element_list, find_element, starting_offset, child_element_predicate = None):
 
-    element.stream.seek(0)
+    ElementMetadata = namedtuple('ElementMetadata', 'element offset')
 
-    file.write(element.stream.read(element.stream.size))
+    offset = starting_offset
 
-    return element.stream.size
+    # enumerate the elements in the list until the requested element is found...
+    for element in element_list:
+        if element.id != find_element.id:
+            offset += element.stream.size
 
+        else:
+            if child_element_predicate is None:
+                # ...no predicate so just return it with the starting offset
+                return ElementMetadata(element, offset)
 
-def __write_element_header(input_file, input_offset, output_file, element_body_size):
+            else:
+                # ....then evaluate the predicate and on matching return it with the starting offset
+                for child_element in element.value:
+                    if child_element_predicate(child_element):
+                        return ElementMetadata(element, offset)
 
-    input_file.seek(input_offset, SEEK_SET)
+                    else:
+                        offset += element.stream.size
+                        break
 
-    element_id, element_id_size = read_element_id(input_file)
-    element_size, element_size_size = read_element_size(input_file)
-
-    output_offset = output_file.tell()
-    output_file.write(encode_element_id(element_id))
-    output_file.write(encode_element_size(element_body_size, element_size_size))
-    new_output_offset = output_file.tell()
-
-    return new_output_offset - output_offset
-
-
-def __write_element_utf8string(output_file, value):
-
-    output_offset = output_file.tell()
-    output_file.write(encode_unicode_string(value))
-    new_output_offset = output_file.tell()
-
-    return new_output_offset - output_offset
+    raise Exception("No {0} element found.".format(find_element.name))
 
 
-def __write_element_uint(output_file, value, size):
+def __buffered_file_copy(input_file, output_file, number_of_bytes = None):
 
-    output_offset = output_file.tell()
-    output_file.write(encode_unsigned_integer(value, size))
-    new_output_offset = output_file.tell()
+    # copy the input file piece-by-piece to avoid excessive memory use
+    for data in __yielding_read(input_file, number_of_bytes):
+        output_file.write(data)
 
-    return new_output_offset - output_offset
+
+def __yielding_read(file_object, number_of_bytes = None):
+
+    DEFAULT_CHUNK_SIZE = 1024 * 64	# 64kb
+    accumulator = 0
+
+    while (number_of_bytes is None) or (number_of_bytes is not None and accumulator < number_of_bytes):
+
+        # calculate the chunk size to use
+        chunk_size = DEFAULT_CHUNK_SIZE
+        if number_of_bytes is not None and ((number_of_bytes - accumulator) < DEFAULT_CHUNK_SIZE):
+            chunk_size = (number_of_bytes - accumulator)
+
+        # read data and break if EOF reached
+        data = file_object.read(chunk_size)
+        if not data:
+            break
+
+        # advance accumulator and yield data
+        accumulator += len(data)
+        yield data
 
 
 if __name__ == "__main__":
